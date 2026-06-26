@@ -1,0 +1,28 @@
+{
+  "name": "uvlink",
+  "version": "0.1.0",
+  "description": "A browser bridge for AWS Lambda MicroVMs — reach a MicroVM endpoint from a browser without hand-rolling a proxy. Injects the X-aws-proxy-auth token for HTTP and the lambda-microvms subprotocols for WebSockets, and auto-refreshes the token.",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "bin": {
+    "uvlink": "bin/cli.mjs"
+  },
+  "files": ["src", "bin", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node test/run.mjs"
+  },
+  "keywords": [
+    "aws", "lambda", "microvm", "lambda-microvms", "firecracker",
+    "proxy", "websocket", "reverse-proxy", "x-aws-proxy-auth", "sandbox"
+  ],
+  "license": "MIT",
+  "author": "PandeyLabs",
+  "repository": { "type": "git", "url": "git+https://github.com/PandeyLabs/uvlink.git" },
+  "homepage": "https://github.com/PandeyLabs/uvlink#readme",
+  "bugs": { "url": "https://github.com/PandeyLabs/uvlink/issues" },
+  "dependencies": {}
+}
