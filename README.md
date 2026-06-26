@@ -1,5 +1,10 @@
 # uvlink
 
+[![npm](https://img.shields.io/npm/v/uvlink.svg)](https://www.npmjs.com/package/uvlink)
+[![CI](https://github.com/PandeyLabs/uvlink/actions/workflows/ci.yml/badge.svg)](https://github.com/PandeyLabs/uvlink/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/uvlink.svg)](LICENSE)
+[![zero deps](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
+
 **Reach an [AWS Lambda MicroVM](https://docs.aws.amazon.com/lambda/latest/dg/lambda-microvms-guide.html) from a browser — without hand-rolling a proxy.**
 
 A MicroVM endpoint requires a credential a browser can't attach: HTTP needs the
@@ -24,6 +29,14 @@ capacity. The names "AWS", "Lambda", and "MicroVMs" are used only descriptively 
 indicate what the tool interoperates with; all trademarks belong to their
 respective owners. Provided under the MIT license with no warranty (see
 [`LICENSE`](LICENSE)). Use at your own risk.
+
+## Install
+
+```bash
+npm install uvlink        # as a library
+# or just run it, no install:
+npx uvlink --help
+```
 
 ## Quick start (CLI)
 
