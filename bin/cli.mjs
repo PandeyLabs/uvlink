@@ -39,7 +39,10 @@ Options:
   --aws-cli <path>    aws binary (default "aws")
   -h, --help
 
-Then open http://localhost:<port> in your browser.`;
+Then open http://localhost:<port> in your browser.
+
+Personal hobby project — not affiliated with, supported by, or endorsed by
+AWS / Lambda / Amazon. MIT licensed, provided as-is.`;
 
 async function lookupEndpoint(microvmId, region, awsCli) {
   const args = ['lambda-microvms', 'get-microvm', '--microvm-identifier', microvmId,

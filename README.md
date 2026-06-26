@@ -15,7 +15,15 @@ dashboards, terminals) ends up writing the same little auth-injecting proxy.
 - ✅ **Zero runtime dependencies** — Node built-ins only
 - ✅ Use it as a **CLI** (`npx`) or a **library**
 
-> Personal/community project, MIT licensed. Not an official AWS product.
+## ⚠️ Disclaimer
+
+**This is a personal hobby project. It is NOT an official product of, affiliated
+with, supported by, or endorsed by AWS, AWS Lambda, or Amazon in any way.** It is
+maintained on a best-effort, as-is basis by an individual in their personal
+capacity. The names "AWS", "Lambda", and "MicroVMs" are used only descriptively to
+indicate what the tool interoperates with; all trademarks belong to their
+respective owners. Provided under the MIT license with no warranty (see
+[`LICENSE`](LICENSE)). Use at your own risk.
 
 ## Quick start (CLI)
 

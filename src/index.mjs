@@ -1,5 +1,8 @@
 // uvlink — a browser bridge for AWS Lambda MicroVMs.
 //
+// Personal hobby project. NOT affiliated with, supported by, or endorsed by
+// AWS / Lambda / Amazon. MIT licensed, provided as-is, no warranty.
+//
 // Public API:
 //   import { createProxy } from 'uvlink';
 //   const proxy = createProxy({ endpoint, microvmId, region, port });
