@@ -87,6 +87,67 @@ createProxy({ endpoint, getToken: async () => myMint() });
 createProxy({ endpoint, microvmId: 'microvm-…', region: 'us-east-1' });
 ```
 
+## One MicroVM, many apps
+
+A single MicroVM often runs several services on different in-VM ports (JupyterLab
+on 8888, TensorBoard on 6006, an API on 8080; or several agents). uvlink can front
+all of them from one process, two ways:
+
+### Mode A — listener-per-port (`--map`)
+
+Each app gets its **own local port**. Nothing rewrites paths, redirects, or
+cookies, so even picky SPAs just work. The robust default.
+
+```bash
+npx uvlink --microvm-id microvm-… --region us-east-1 \
+  --map 3000:8888 \   # Jupyter     -> http://localhost:3000
+  --map 3001:6006 \   # TensorBoard -> http://localhost:3001
+  --map 3002:8080     # API         -> http://localhost:3002
+```
+
+```js
+createProxy({
+  endpoint, microvmId: 'microvm-…', region: 'us-east-1',
+  routes: [
+    { listen: 3000, backendPort: 8888 },
+    { listen: 3001, backendPort: 6006 },
+  ],
+});
+```
+
+### Mode B — path-prefix on one origin (`--route`)
+
+**One** local port; a path prefix selects the app. Great for fronting several
+agents/services behind a single URL with no CORS between them (a control UI can
+talk to every backend same-origin). The prefix is stripped before forwarding and
+`Location` redirects are rewritten so apps mounted under a prefix still work.
+
+```bash
+npx uvlink --microvm-id microvm-… --region us-east-1 --port 3000 \
+  --route /agent-a=7001 \   # -> http://localhost:3000/agent-a
+  --route /agent-b=7002 \   # -> http://localhost:3000/agent-b
+  --route /console=7000     # -> http://localhost:3000/console
+```
+
+```js
+createProxy({
+  endpoint, microvmId: 'microvm-…', region: 'us-east-1', port: 3000,
+  routes: [
+    { prefix: '/agent-a', backendPort: 7001, stripPrefix: true },
+    { prefix: '/agent-b', backendPort: 7002, stripPrefix: true },
+  ],
+});
+```
+
+Pass `--no-strip-prefix` (or `stripPrefix: false`) when the app is already mounted
+under the prefix. Longest matching prefix wins; an unmatched path returns 404.
+
+When self-minting, the token is automatically **scoped to just the ports you
+route to** (least privilege) — pass `--allowed-ports all` (or `allowedPorts: 'all'`)
+to opt out, or a custom list to override. See [`examples/multi-app.mjs`](examples/multi-app.mjs)
+(Mode A), [`examples/multi-agent.mjs`](examples/multi-agent.mjs) (Mode B), and
+[`docs/routing-spec.html`](docs/routing-spec.html) for the design.
+
 ## API
 
 ### `createProxy(options)`

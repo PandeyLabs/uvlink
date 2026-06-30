@@ -17,14 +17,31 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const DEFAULT_TTL_MIN = 60;            // platform max
 const REFRESH_BEFORE_MS = 10 * 60_000; // refresh when <10 min remains
+const ALL_PORTS = '[{"allPorts":{}}]';
+
+// Build the --allowed-ports JSON for create-microvm-auth-token. Pass an array
+// of in-VM ports for a least-privilege token scoped to just those apps, or
+// 'all' (or a falsy value) for the platform's all-ports token. A string that
+// already looks like JSON is passed through unchanged.
+function allowedPortsJson(ports) {
+  if (!ports || ports === 'all') return ALL_PORTS;
+  if (typeof ports === 'string' && ports.trim().startsWith('[')) return ports;
+  const list = (Array.isArray(ports) ? ports : String(ports).split(','))
+    .map((p) => Number(p))
+    .filter((p) => Number.isInteger(p) && p > 0);
+  if (!list.length) return ALL_PORTS;
+  const uniq = [...new Set(list)];
+  return JSON.stringify(uniq.map((port) => ({ port })));
+}
 
 // Mint a token by shelling out to the AWS CLI (no SDK needed).
-async function mintViaCli({ microvmId, region, awsCli = 'aws', ttlMinutes = DEFAULT_TTL_MIN, allowedPorts = '[{"allPorts":{}}]' }) {
+// `allowedPorts` may be an array of ports, a comma string, 'all', or raw JSON.
+async function mintViaCli({ microvmId, region, awsCli = 'aws', ttlMinutes = DEFAULT_TTL_MIN, allowedPorts }) {
   if (!microvmId) throw new Error('mint config requires microvmId');
   const args = ['lambda-microvms', 'create-microvm-auth-token',
     '--microvm-identifier', microvmId,
     '--expiration-in-minutes', String(ttlMinutes),
-    '--allowed-ports', allowedPorts,
+    '--allowed-ports', allowedPortsJson(allowedPorts),
     '--query', 'authToken."X-aws-proxy-auth"', '--output', 'text'];
   if (region) args.push('--region', region);
   const { stdout } = await exec(awsCli, args);
@@ -85,4 +102,4 @@ export function createTokenProvider(opts = {}) {
   };
 }
 
-export { mintViaCli };
+export { mintViaCli, allowedPortsJson };

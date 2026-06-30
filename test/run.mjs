@@ -4,8 +4,8 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import assert from 'node:assert';
-import { createProxyServer, buildWsProtocols } from '../src/proxy.mjs';
-import { createTokenProvider } from '../src/index.mjs';
+import { createProxyServer, buildWsProtocols, rewriteLocation } from '../src/proxy.mjs';
+import { createTokenProvider, allowedPortsJson, classifyRoutes, makePrefixResolver, createPool } from '../src/index.mjs';
 
 let pass = 0, fail = 0;
 const ok = (name) => { console.log(`  ok  - ${name}`); pass++; };
@@ -112,6 +112,171 @@ await t('WS: proxy injects lambda-microvms subprotocols and echo round-trips', a
   assert.equal(echo, 'echo', 'echo frame returned through proxy');
   assert.ok(mock.seen.ws.subprotocols.includes('lambda-microvms.authentication.' + TOKEN), 'token in subprotocols');
   assert.ok(mock.seen.ws.subprotocols.includes('v1.kernel.websocket.jupyter.org'), 'app subprotocol preserved');
+});
+
+// --- unit: allowedPortsJson (token scoping) ---
+await t('allowedPortsJson: array of ports -> scoped JSON', () => {
+  assert.equal(allowedPortsJson([8888, 6006]), '[{"port":8888},{"port":6006}]');
+});
+await t('allowedPortsJson: comma string -> scoped JSON, deduped', () => {
+  assert.equal(allowedPortsJson('8888,6006,8888'), '[{"port":8888},{"port":6006}]');
+});
+await t("allowedPortsJson: 'all' / empty -> allPorts", () => {
+  assert.equal(allowedPortsJson('all'), '[{"allPorts":{}}]');
+  assert.equal(allowedPortsJson(), '[{"allPorts":{}}]');
+});
+await t('allowedPortsJson: raw JSON passed through', () => {
+  assert.equal(allowedPortsJson('[{"port":1234}]'), '[{"port":1234}]');
+});
+
+// --- integration: per-request resolvePort routes to the right in-VM port ---
+// Two proxies front the SAME mock VM but resolve different in-VM ports, the way
+// Mode A's listener-per-port works. We assert the port header (HTTP) and the
+// lambda-microvms.port subprotocol (WS) each carry the route's port.
+await t('multi-app: resolvePort sets X-aws-proxy-port per route (HTTP)', async () => {
+  for (const vmPort of ['8888', '6006']) {
+    const srv = createProxyServer({
+      endpoint: '127.0.0.1', getToken: async () => TOKEN,
+      resolvePort: () => vmPort, _upstreamPort: mock.port, _upstreamTls: false,
+    });
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const p = srv.address().port;
+    await new Promise((resolve, reject) => {
+      http.get(`http://127.0.0.1:${p}/`, (res) => { res.on('data', () => {}); res.on('end', resolve); }).on('error', reject);
+    });
+    assert.equal(mock.seen.http.portHeader, vmPort, `routed to in-VM :${vmPort}`);
+    srv.close();
+  }
+});
+
+await t('multi-app: resolvePort sets lambda-microvms.port subprotocol (WS)', async () => {
+  const srv = createProxyServer({
+    endpoint: '127.0.0.1', getToken: async () => TOKEN,
+    resolvePort: () => '6006', _upstreamPort: mock.port, _upstreamTls: false,
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+  const key = crypto.randomBytes(16).toString('base64');
+  await new Promise((resolve, reject) => {
+    const req = http.request(`http://127.0.0.1:${p}/socket`, {
+      headers: { Connection: 'Upgrade', Upgrade: 'websocket',
+        'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': key },
+    });
+    req.on('upgrade', (res, sock) => { sock.once('data', () => resolve()); sock.write(wsFrame('hi')); });
+    req.on('error', reject);
+    req.end();
+    setTimeout(() => reject(new Error('ws timeout')), 4000);
+  });
+  assert.ok(mock.seen.ws.subprotocols.includes('lambda-microvms.port.6006'), 'routed WS to in-VM :6006');
+  srv.close();
+});
+
+// --- integration: a resolver returning null is a 404 (no route) ---
+await t('multi-app: resolvePort -> null yields 404', async () => {
+  const srv = createProxyServer({
+    endpoint: '127.0.0.1', getToken: async () => TOKEN,
+    resolvePort: () => null, _upstreamPort: mock.port, _upstreamTls: false,
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+  const code = await new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${p}/nope`, (res) => { res.on('data', () => {}); res.on('end', () => resolve(res.statusCode)); }).on('error', reject);
+  });
+  assert.equal(code, 404, 'no route -> 404');
+  srv.close();
+});
+
+// --- unit: prefix resolver (Mode B) — longest match, strip, path rewrite ---
+await t('makePrefixResolver: longest prefix wins + strips', () => {
+  const r = makePrefixResolver([
+    { prefix: '/a', backendPort: '7001', stripPrefix: true },
+    { prefix: '/a/deep', backendPort: '7009', stripPrefix: true },
+  ]);
+  assert.deepEqual(r({ url: '/a/deep/x' }), { port: '7009', path: '/x', prefix: '/a/deep' });
+  assert.deepEqual(r({ url: '/a/y' }), { port: '7001', path: '/y', prefix: '/a' });
+  assert.equal(r({ url: '/a' }).path, '/', 'bare prefix -> /');
+  assert.equal(r({ url: '/nope' }), null, 'unmatched -> null');
+});
+await t('makePrefixResolver: no-strip keeps the full path', () => {
+  const r = makePrefixResolver([{ prefix: '/a', backendPort: '7001', stripPrefix: false }]);
+  assert.deepEqual(r({ url: '/a/y' }), { port: '7001', path: '/a/y' });
+});
+
+// --- unit: classifyRoutes picks the mode and rejects mixing ---
+await t('classifyRoutes: detects prefix / port / single', () => {
+  assert.equal(classifyRoutes({ routes: [{ prefix: '/a', backendPort: 1 }] }).mode, 'prefix');
+  assert.equal(classifyRoutes({ routes: [{ listen: 3000, backendPort: 1 }] }).mode, 'port');
+  assert.equal(classifyRoutes({}).mode, 'single');
+});
+await t('classifyRoutes: rejects mixing listen + prefix', () => {
+  assert.throws(() => classifyRoutes({ routes: [{ listen: 3000, backendPort: 1 }, { prefix: '/a', backendPort: 2 }] }), /pick one mode/);
+});
+
+// --- unit: rewriteLocation re-adds a stripped prefix ---
+await t('rewriteLocation: re-adds prefix to absolute-path redirects only', () => {
+  assert.equal(rewriteLocation({ location: '/login' }, '/a').location, '/a/login');
+  assert.equal(rewriteLocation({ location: 'https://x/y' }, '/a').location, 'https://x/y', 'absolute URL untouched');
+  assert.equal(rewriteLocation({ location: '//evil' }, '/a').location, '//evil', 'protocol-relative untouched');
+  assert.equal(rewriteLocation({}, '/a').location, undefined, 'no Location -> nothing');
+});
+
+// --- integration: prefix mode through a real proxy server, both apps + WS ---
+await t('prefix mode: one origin routes /a and /b to different in-VM ports + strips path', async () => {
+  const srv = createProxyServer({
+    endpoint: '127.0.0.1', getToken: async () => TOKEN,
+    resolveRoute: makePrefixResolver([
+      { prefix: '/a', backendPort: '7001', stripPrefix: true },
+      { prefix: '/b', backendPort: '7002', stripPrefix: true },
+    ]),
+    _upstreamPort: mock.port, _upstreamTls: false,
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+  const get = (path) => new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${p}${path}`, (res) => { res.on('data', () => {}); res.on('end', resolve); }).on('error', reject);
+  });
+  await get('/a/info');
+  assert.equal(mock.seen.http.portHeader, '7001', '/a -> :7001');
+  assert.equal(mock.seen.http.url, '/info', 'prefix /a stripped from upstream path');
+  await get('/b/status');
+  assert.equal(mock.seen.http.portHeader, '7002', '/b -> :7002');
+  assert.equal(mock.seen.http.url, '/status', 'prefix /b stripped');
+
+  // WS under a prefix must route + strip the same way
+  const key = crypto.randomBytes(16).toString('base64');
+  await new Promise((resolve, reject) => {
+    const req = http.request(`http://127.0.0.1:${p}/b/ws`, {
+      headers: { Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': key },
+    });
+    req.on('upgrade', (res, sock) => { sock.once('data', () => resolve()); sock.write(wsFrame('hi')); });
+    req.on('error', reject); req.end();
+    setTimeout(() => reject(new Error('ws timeout')), 4000);
+  });
+  assert.ok(mock.seen.ws.subprotocols.includes('lambda-microvms.port.7002'), 'WS /b -> :7002');
+  srv.close();
+});
+
+// --- integration: createPool round-robins + injects auth via the shared core ---
+await t('pool: round-robins targets, injects auth + x-served-by', async () => {
+  const pool = createPool({
+    targets: [
+      { endpoint: 'vm-a', getToken: async () => TOKEN },
+      { endpoint: 'vm-b', getToken: async () => TOKEN },
+    ],
+    backendPort: '8080', _upstreamPort: mock.port, _upstreamTls: false, _upstreamHost: '127.0.0.1',
+  });
+  await pool.listen(0, '127.0.0.1');
+  const p = pool.server.address().port;
+  const served = [];
+  for (let i = 0; i < 2; i++) {
+    const sb = await new Promise((resolve, reject) => {
+      http.get(`http://127.0.0.1:${p}/`, (res) => { res.on('data', () => {}); res.on('end', () => resolve(res.headers['x-served-by'])); }).on('error', reject);
+    });
+    served.push(sb);
+  }
+  assert.equal(mock.seen.http.authHeader, TOKEN, 'pool injected auth header');
+  assert.deepEqual(served.sort(), ['vm-a', 'vm-b'], 'round-robined across both targets');
+  await pool.close();
 });
 
 proxySrv.close(); mock.srv.close();

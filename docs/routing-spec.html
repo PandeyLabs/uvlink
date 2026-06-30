@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>uvlink — One MicroVM, Many Apps</title>
+<style>
+  :root{--bg:#0a0e16;--panel:#121a28;--panel2:#0e1622;--line:#1f2c40;--txt:#cfe0f5;
+        --dim:#7f9cc4;--green:#3ddc84;--accent:#4ea1ff;--amber:#ffb454;--purple:#c792ea;--red:#ff6b6b}
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       background:radial-gradient(1400px 700px at 75% -10%,#13233c,#0a0e16);color:var(--txt)}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  code{background:#0c1422;border:1px solid #1f2c40;border-radius:4px;padding:1px 5px;font-size:13px}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 22px 80px}
+  header{padding:54px 22px 30px;text-align:center;border-bottom:1px solid var(--line);margin-bottom:8px}
+  header h1{font-size:30px;margin:0 0 10px;letter-spacing:.3px}
+  header .sub{color:var(--dim);font-size:16px;max-width:760px;margin:0 auto}
+  .tag{display:inline-block;background:#10331f;color:var(--green);border:1px solid #1c5234;
+       border-radius:20px;padding:3px 12px;font-size:12px;margin:16px 6px 0;font-family:ui-monospace,monospace}
+  .tag.draft{background:#2a1d05;color:var(--amber);border-color:#5a3f0c}
+  nav{position:sticky;top:0;background:rgba(10,14,22,.92);backdrop-filter:blur(8px);
+      border-bottom:1px solid var(--line);padding:10px 22px;z-index:10;font-size:13px;overflow-x:auto;white-space:nowrap}
+  nav a{color:var(--dim);text-decoration:none;margin-right:16px}
+  nav a:hover{color:var(--accent)}
+  section{margin-top:46px}
+  h2{font-size:23px;border-left:3px solid var(--accent);padding-left:12px;margin:0 0 6px}
+  h2 .num{color:var(--accent);font-family:ui-monospace,monospace;font-size:18px}
+  .lead{color:var(--dim);margin:0 0 20px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;margin:16px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+  @media(max-width:760px){.grid2,.grid3{grid-template-columns:1fr}}
+  h3{font-size:16px;margin:0 0 8px}
+  .muted{color:var(--dim);font-size:14px}
+  .pill{display:inline-block;background:#0f1a2b;border:1px solid var(--line);border-radius:6px;
+        padding:2px 9px;margin:2px 4px 2px 0;font-size:12px;font-family:ui-monospace,monospace}
+  .pill.green{background:#10331f;color:var(--green);border-color:#1c5234}
+  .pill.amber{background:#2a1d05;color:var(--amber);border-color:#5a3f0c}
+  .pill.red{background:#220c0c;color:var(--red);border-color:#5a1c1c}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}
+  th{text-align:left;color:var(--accent);border-bottom:1px solid var(--line);padding:8px 10px;font-weight:600}
+  td{padding:8px 10px;border-bottom:1px solid #18202f;vertical-align:top}
+  .ok{color:var(--green)}.warn{color:var(--amber)}.bad{color:var(--red)}
+  pre{background:#0c1422;border:1px solid var(--line);border-radius:8px;padding:14px;overflow:auto;
+      font-size:12.5px;line-height:1.55;color:#bcd}
+  pre .c{color:#5a7296}
+  svg{width:100%;height:auto;display:block;margin:6px 0}
+  .cap{color:var(--dim);font-size:12px;text-align:center;margin-top:4px}
+  .callout{border-left:3px solid var(--amber);background:#1a1408;padding:12px 16px;border-radius:0 8px 8px 0;margin:14px 0}
+  .callout.good{border-color:var(--green);background:#0c1f13}
+  .callout.bad{border-color:var(--red);background:#1f0c0c}
+  .callout.info{border-color:var(--accent);background:#0b1a2b}
+  .step{display:flex;gap:14px;margin:12px 0}
+  .step .n{flex:0 0 30px;height:30px;border-radius:50%;background:#173049;border:1px solid #25456a;
+           display:flex;align-items:center;justify-content:center;font-family:ui-monospace,monospace;color:var(--accent)}
+  footer{margin-top:60px;padding-top:24px;border-top:1px solid var(--line);color:var(--dim);font-size:13px;text-align:center}
+  .ladder .rung{display:flex;gap:14px;align-items:flex-start;margin:14px 0}
+  .ladder .rung .num{flex:0 0 34px;height:34px;border-radius:8px;background:#173049;border:1px solid #25456a;
+       display:flex;align-items:center;justify-content:center;color:var(--accent);font-family:ui-monospace,monospace;font-weight:700}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>uvlink — One MicroVM, Many Apps</h1>
+  <div class="sub">Design spec for reaching several apps running inside a <em>single</em> Lambda MicroVM
+  through one uvlink process. Scoped deliberately to this one topology — no fan-out, no fan-in, no fleet.</div>
+  <div>
+    <span class="tag draft">STATUS: DRAFT SPEC — not yet implemented</span>
+    <span class="tag">uvlink v0.1.0 → v0.2.0</span>
+  </div>
+</header>
+
+<nav>
+  <a href="#problem">1 · Problem</a>
+  <a href="#mechanic">2 · The mechanic</a>
+  <a href="#today">3 · What uvlink does today</a>
+  <a href="#modes">4 · Two routing modes</a>
+  <a href="#flow">5 · Request flow</a>
+  <a href="#token">6 · One scoped token</a>
+  <a href="#edges">7 · Sharp edges</a>
+  <a href="#api">8 · API &amp; CLI</a>
+  <a href="#plan">9 · Build plan</a>
+</nav>
+
+<div class="wrap">
+
+<!-- ───────────────────────────── 1 ───────────────────────────── -->
+<section id="problem">
+  <h2><span class="num">01</span> The problem</h2>
+  <p class="lead">You snapshot <b>one</b> MicroVM image that starts several services. uvlink today
+  reaches exactly one of them.</p>
+  <div class="panel">
+    <p>A single dev/sandbox VM commonly runs more than one thing on different in-VM ports:</p>
+    <p>
+      <span class="pill">JupyterLab :8888</span>
+      <span class="pill">TensorBoard :6006</span>
+      <span class="pill">Vite / Next dev :3000</span>
+      <span class="pill">an API :8080</span>
+      <span class="pill">code-server :8443</span>
+    </p>
+    <p class="muted">Right now you'd launch four uvlink processes on four local ports and juggle them.
+    The goal: <b>one uvlink, one command, all the apps on that VM reachable from the browser.</b></p>
+  </div>
+  <div class="callout info">
+    <b>Why this is the right thing to build first.</b> It's the most common real setup, and it needs
+    <em>no</em> fleet logic, discovery, stickiness, or load balancing — those only appear once there's more
+    than one VM. Multi-app-on-one-VM is purely a question of <em>which in-VM port does this request go to</em>.
+  </div>
+</section>
+
+<!-- ───────────────────────────── 2 ───────────────────────────── -->
+<section id="mechanic">
+  <h2><span class="num">02</span> The mechanic uvlink rests on</h2>
+  <p class="lead">The in-VM destination port is chosen <b>per request, by uvlink</b> — not fixed by the VM.</p>
+  <div class="panel">
+    <p>Every MicroVM request carries the target in-VM port alongside the auth token. uvlink sets both:</p>
+    <table>
+      <tr><th>Protocol</th><th>Auth carried by</th><th>In-VM port carried by</th></tr>
+      <tr>
+        <td><b>HTTP</b></td>
+        <td><code>X-aws-proxy-auth: &lt;token&gt;</code></td>
+        <td><code>X-aws-proxy-port: 8888</code></td>
+      </tr>
+      <tr>
+        <td><b>WebSocket</b></td>
+        <td><code>lambda-microvms.authentication.&lt;token&gt;</code> subprotocol</td>
+        <td><code>lambda-microvms.port.8888</code> subprotocol</td>
+      </tr>
+    </table>
+    <div class="callout good">
+      Because uvlink already writes <code>X-aws-proxy-port</code> / <code>lambda-microvms.port.N</code> on
+      every request, routing to multiple apps is just <b>choosing that number per request</b>. The token only
+      has to <em>permit</em> the port (see §6). No platform change, no new protocol — a small, local decision.
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 3 ───────────────────────────── -->
+<section id="today">
+  <h2><span class="num">03</span> What uvlink does today (and the one change)</h2>
+  <p class="lead">Today <code>backendPort</code> is a single constant baked in at <code>createProxy</code> time.</p>
+  <div class="panel">
+    <div class="grid2">
+      <div>
+        <h3>Today</h3>
+<pre>createProxyServer({
+  endpoint, getToken,
+  backendPort: <b>'8080'</b>   <span class="c">// one fixed port</span>
+});</pre>
+        <p class="muted">Every request — HTTP and WS — gets the same hardcoded port. One app only.</p>
+      </div>
+      <div>
+        <h3>The change</h3>
+<pre>createProxyServer({
+  endpoint, getToken,
+  <b>resolvePort(req)</b>      <span class="c">// pick port per request</span>
+});</pre>
+        <p class="muted">Replace the constant with a small function of the request. Single-app mode becomes
+        a function that returns a constant — fully backwards compatible.</p>
+      </div>
+    </div>
+    <div class="callout good">
+      That's the whole core change: <b><code>backendPort</code> → <code>resolvePort(req)</code></b>.
+      Both the HTTP handler and the WS upgrade handler call it. Everything in §4 is just different
+      <code>resolvePort</code> implementations. As a bonus this is the same shape that lets us delete the
+      drifted duplicate proxy in <code>pool.mjs</code> later.
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 4 ───────────────────────────── -->
+<section id="modes">
+  <h2><span class="num">04</span> Two ways to map browser → in-VM ports</h2>
+  <p class="lead">For one VM with many apps there are two practical mappings. They differ in robustness.</p>
+
+  <div class="grid2">
+    <div class="panel">
+      <h3>Mode A — Listener-per-port <span class="pill green">recommended default</span></h3>
+      <p class="muted">uvlink binds several <em>local</em> ports; each maps to one in-VM port.</p>
+<pre>localhost:3000  ──▶  VM :8888  (Jupyter)
+localhost:3001  ──▶  VM :6006  (TensorBoard)
+localhost:3002  ──▶  VM :3000  (dev server)</pre>
+      <p><span class="pill green">zero rewriting</span><span class="pill green">every app sees itself at root</span></p>
+      <p class="muted">Each app gets its own clean origin. Nothing touches paths, redirects, or cookies — so
+      even the pickiest SPA works. <code>resolvePort</code> = "the port bound to the listener that received this request."</p>
+      <p class="warn">Cost: N local ports to remember and (if remote) tunnel.</p>
+    </div>
+    <div class="panel">
+      <h3>Mode B — Path-prefix <span class="pill amber">opt-in</span></h3>
+      <p class="muted">One local port; a path prefix selects the app.</p>
+<pre>localhost:3000/jupyter/*  ──▶  VM :8888
+localhost:3000/tb/*       ──▶  VM :6006
+localhost:3000/api/*      ──▶  VM :8080</pre>
+      <p><span class="pill green">single origin</span><span class="pill green">one port to tunnel</span></p>
+      <p class="warn">⚠ The app must tolerate a base path. Jupyter (<code>--ServerApp.base_url</code>) and
+      TensorBoard (<code>--path_prefix</code>) do; many SPAs don't. Needs <code>Location</code>-header
+      rewriting and care with cookie <code>Path</code>. This is where "works for Jupyter, breaks for my SPA"
+      reports come from.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <b>Recommendation:</b> ship <b>Mode A first</b> — it's robust and covers the common case with no rewriting.
+    Add Mode B as an explicit opt-in for people who specifically want a single shareable origin and run
+    base-path-friendly apps. (Subdomain routing — <code>jupyter.localhost</code> — is deferred; it needs DNS
+    setup and adds little for a single VM.)
+  </div>
+</section>
+
+<!-- ───────────────────────────── 5 ───────────────────────────── -->
+<section id="flow">
+  <h2><span class="num">05</span> Request flow, end to end</h2>
+  <p class="lead">What actually happens to one request, for both protocols, in Mode A.</p>
+  <div class="panel">
+    <h3>HTTP</h3>
+    <div class="step"><div class="n">1</div><div>Browser hits <code>localhost:3001/</code> (the TensorBoard listener).</div></div>
+    <div class="step"><div class="n">2</div><div><code>resolvePort(req)</code> → <code>6006</code> (this listener's mapped in-VM port).</div></div>
+    <div class="step"><div class="n">3</div><div>Token provider returns the current (cached, auto-refreshed) JWE.</div></div>
+    <div class="step"><div class="n">4</div><div>uvlink opens HTTPS to the VM <code>endpoint</code> with headers
+      <code>X-aws-proxy-auth: &lt;jwe&gt;</code> + <code>X-aws-proxy-port: 6006</code> and pipes the response back.</div></div>
+    <h3 style="margin-top:18px">WebSocket (e.g. a Jupyter kernel on the :8888 listener)</h3>
+    <div class="step"><div class="n">1</div><div>Browser upgrades on <code>localhost:3000/api/kernels/…/channels</code>.</div></div>
+    <div class="step"><div class="n">2</div><div><code>resolvePort(req)</code> → <code>8888</code>.</div></div>
+    <div class="step"><div class="n">3</div><div>uvlink builds <code>Sec-WebSocket-Protocol</code>:
+      <code>lambda-microvms</code>, <code>lambda-microvms.authentication.&lt;jwe&gt;</code>,
+      <code>lambda-microvms.port.8888</code>, <b>+ the app's own subprotocol</b>
+      (<code>v1.kernel.websocket.jupyter.org</code>) preserved.</div></div>
+    <div class="step"><div class="n">4</div><div>TLS-connects to the VM, replays the upgrade, then pipes bytes both ways.</div></div>
+    <div class="callout info">
+      The WS upgrade is a <b>separate handler</b> from HTTP in the current code. Both must call the same
+      <code>resolvePort</code>, or a kernel socket lands on the wrong app's port. This is the single easiest
+      thing to get wrong — call it out in tests.
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 6 ───────────────────────────── -->
+<section id="token">
+  <h2><span class="num">06</span> One token, scoped to the apps you expose</h2>
+  <p class="lead">A single MicroVM means a single token — but it should permit exactly the ports you route to.</p>
+  <div class="panel">
+    <p>Today uvlink mints with <code>allowedPorts = [{"allPorts":{}}]</code> — the token can reach
+    <em>any</em> port in the VM. For multi-app it's cleaner and safer to scope it to just the apps you expose:</p>
+<pre>aws lambda-microvms create-microvm-auth-token \
+  --microvm-identifier microvm-… \
+  --expiration-in-minutes 60 \
+  --allowed-ports <b>'[{"port":8888},{"port":6006},{"port":8080}]'</b></pre>
+    <div class="grid2">
+      <div>
+        <h3>One token covers all apps</h3>
+        <p class="muted">Same VM, same auth boundary — no need for a token per app. The existing
+        cache + auto-refresh provider is unchanged; it just mints a wider-scoped token.</p>
+      </div>
+      <div>
+        <h3>Least privilege is the only real choice</h3>
+        <p class="muted">If you expose uvlink beyond localhost, <code>allPorts</code> means a reachable proxy
+        can hit <em>internal</em> ports you never meant to publish (a debug port, a DB on :5432).
+        Scoping to the routed ports removes that.</p>
+      </div>
+    </div>
+    <div class="callout">
+      Derive <code>allowedPorts</code> automatically from the configured routes (the set of in-VM ports),
+      with an override flag. The user states the apps once; the token scope follows.
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 7 ───────────────────────────── -->
+<section id="edges">
+  <h2><span class="num">07</span> Sharp edges (single-VM, multi-app only)</h2>
+  <div class="panel">
+    <table>
+      <tr><th>Edge</th><th>Mode</th><th>Bites when</th><th>Mitigation</th></tr>
+      <tr><td>WS handler skips routing</td><td>A &amp; B</td><td>upgrade path doesn't call <code>resolvePort</code> → kernel hits wrong app</td><td>shared <code>resolvePort</code> in both handlers; test it</td></tr>
+      <tr><td>Absolute redirects</td><td>B</td><td>app returns <code>Location: /login</code> under <code>/jupyter</code> → browser jumps to root</td><td>rewrite <code>Location</code> to re-add the prefix</td></tr>
+      <tr><td>App assumes root path</td><td>B</td><td>SPA requests <code>/static/x.js</code>, not <code>/jupyter/static/x.js</code></td><td>require base-path config; document which apps work; or use Mode A</td></tr>
+      <tr><td>Cookie <code>Path</code> collisions</td><td>B</td><td>two apps under one origin overwrite each other's cookies</td><td>Mode A sidesteps entirely (separate origins)</td></tr>
+      <tr><td>App not up yet</td><td>A &amp; B</td><td>VM resumed but app on :6006 still starting → connection refused</td><td>per-route readiness probe; clean 502/"starting" instead of a raw error</td></tr>
+      <tr><td>Over-broad token</td><td>A &amp; B</td><td><code>allPorts</code> + non-localhost bind exposes internal ports</td><td>scope token to routed ports (§6)</td></tr>
+    </table>
+    <p class="muted">Note how many edges are <b>Mode B only</b> — another reason listener-per-port is the safe default.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 8 ───────────────────────────── -->
+<section id="api">
+  <h2><span class="num">08</span> API &amp; CLI sketch</h2>
+  <div class="panel">
+    <h3>CLI (Mode A — the headline ergonomics)</h3>
+<pre>uvlink --microvm-id microvm-… --region us-east-1 \
+       --map 3000:8888 \      <span class="c"># Jupyter</span>
+       --map 3001:6006 \      <span class="c"># TensorBoard</span>
+       --map 3002:8080        <span class="c"># API</span>
+
+  ✓ Jupyter      http://localhost:3000
+  ✓ TensorBoard  http://localhost:3001
+  ✓ API          http://localhost:3002
+  (token scoped to ports 8888, 6006, 8080; auto-refreshing)</pre>
+
+    <h3>CLI (Mode B — single origin, opt-in)</h3>
+<pre>uvlink --microvm-id microvm-… --region us-east-1 --port 3000 \
+       --route /jupyter=8888 \
+       --route /tb=6006 --strip-prefix</pre>
+
+    <h3>Library</h3>
+<pre><span class="c">// Backwards compatible — single app, unchanged:</span>
+createProxy({ endpoint, microvmId, region, port: 3000, backendPort: 8888 });
+
+<span class="c">// Mode A — listener-per-port:</span>
+createProxy({
+  endpoint, microvmId, region,
+  routes: [
+    { listen: 3000, backendPort: 8888 },
+    { listen: 3001, backendPort: 6006 },
+    { listen: 3002, backendPort: 8080 },
+  ],
+  <span class="c">// allowedPorts derived from routes; override with allowedPorts: [...]</span>
+});
+
+<span class="c">// Mode B — path-prefix on one origin:</span>
+createProxy({
+  endpoint, microvmId, region, port: 3000,
+  routes: [
+    { prefix: '/jupyter', backendPort: 8888, stripPrefix: true },
+    { prefix: '/tb',      backendPort: 6006, stripPrefix: true },
+  ],
+});</pre>
+    <div class="callout info">
+      Open questions: (a) <code>--map a:b</code> vs <code>--route /p=port</code> naming;
+      (b) should a single shared local port with <em>auto-assigned</em> listeners be possible, or always explicit;
+      (c) default <code>stripPrefix</code> on or off in Mode B;
+      (d) print a readiness check per app at startup, or lazily on first request.
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────────── 9 ───────────────────────────── -->
+<section id="plan">
+  <h2><span class="num">09</span> Build plan</h2>
+  <p class="lead">Small, ordered, each step shippable.</p>
+  <div class="panel ladder">
+    <div class="rung"><div class="num">1</div><div>
+      <b>Core: <code>backendPort</code> → <code>resolvePort(req)</code></b> in <code>proxy.mjs</code>, called from
+      both the HTTP and WS handlers. Single-app path becomes a constant resolver — no behavior change, fully compatible.
+    </div></div>
+    <div class="rung"><div class="num">2</div><div>
+      <b>Mode A (listener-per-port).</b> <code>createProxy({ routes:[{listen,backendPort}] })</code> binds one
+      server per listener sharing the token provider. CLI <code>--map local:vm</code>. The common case, no rewriting.
+    </div></div>
+    <div class="rung"><div class="num">3</div><div>
+      <b>Scoped token.</b> Derive <code>allowedPorts</code> from the route set; pass through <code>mintViaCli</code>.
+      Flag to override.
+    </div></div>
+    <div class="rung"><div class="num">4</div><div>
+      <b>Mode B (path-prefix), opt-in.</b> Prefix match in <code>resolvePort</code> + <code>stripPrefix</code> +
+      <code>Location</code> rewriting. Same logic in the WS upgrade path.
+    </div></div>
+    <div class="rung"><div class="num">5</div><div>
+      <b>Tests + examples.</b> Extend the mock backend to two ports; assert each request reaches the right one
+      (HTTP <em>and</em> WS). Add a <code>multi-app.mjs</code> example.
+    </div></div>
+  </div>
+  <div class="callout good">
+    <b>First slice = steps 1–3.</b> Delivers "one uvlink, all the apps on my VM" with least-privilege tokens
+    and no rewriting risk. Mode B is a clean follow-up on the same <code>resolvePort</code> seam.
+  </div>
+</section>
+
+<footer>
+  uvlink · one MicroVM, many apps · DRAFT spec for review · personal hobby project, not affiliated with or
+  endorsed by AWS / Lambda / Amazon · MIT
+</footer>
+
+</div>
+</body>
+</html>

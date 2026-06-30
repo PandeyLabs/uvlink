@@ -12,14 +12,39 @@ import { createProxy } from '../src/index.mjs';
 
 const exec = promisify(execFile);
 
+// Flags that may repeat accumulate into an array (e.g. --map a:b --map c:d).
+const REPEATABLE = new Set(['map', 'route']);
+// Boolean flags take no value.
+const BOOLEAN = new Set(['strip-prefix', 'no-strip-prefix']);
+
 function parseArgs(argv) {
   const o = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') { o.help = true; continue; }
-    if (a.startsWith('--')) { const k = a.slice(2); const v = argv[i + 1]; o[k] = v; i++; }
+    if (a.startsWith('--')) {
+      const k = a.slice(2);
+      if (BOOLEAN.has(k)) { o[k] = true; continue; }
+      const v = argv[i + 1]; i++;
+      if (REPEATABLE.has(k)) (o[k] ||= []).push(v);
+      else o[k] = v;
+    }
   }
   return o;
+}
+
+// Parse a "--map local:vm" value into { listen, backendPort }.
+function parseMap(spec) {
+  const m = /^(\d+):(\d+)$/.exec(String(spec).trim());
+  if (!m) throw new Error(`--map expects local:vm (e.g. 3000:8888), got "${spec}"`);
+  return { listen: Number(m[1]), backendPort: Number(m[2]) };
+}
+
+// Parse a "--route /prefix=vmPort" value into { prefix, backendPort }.
+function parseRoute(spec) {
+  const m = /^(\/[^=]*)=(\d+)$/.exec(String(spec).trim());
+  if (!m) throw new Error(`--route expects /prefix=vmPort (e.g. /agent-a=7001), got "${spec}"`);
+  return { prefix: m[1], backendPort: Number(m[2]) };
 }
 
 const HELP = `uvlink — a browser bridge for AWS Lambda MicroVMs
@@ -27,19 +52,28 @@ const HELP = `uvlink — a browser bridge for AWS Lambda MicroVMs
 Usage:
   uvlink --microvm-id <id> [--region <r>] [--port 3000]
   uvlink --endpoint <host> --token <jwe> [--port 3000]
+  uvlink --microvm-id <id> --map 3000:8888 --map 3001:6006        # many apps, many local ports
+  uvlink --microvm-id <id> --port 3000 \\
+         --route /agent-a=7001 --route /agent-b=7002              # many apps, ONE origin (by path)
 
 Options:
-  --microvm-id <id>   MicroVM id; endpoint is looked up, token self-minted + refreshed
-  --endpoint <host>   MicroVM endpoint host (no scheme); required if no --microvm-id
-  --token <jwe>       static token (skip self-minting)
-  --region <r>        AWS region (for --microvm-id lookup/mint)
-  --backend-port <p>  in-VM port to route to (default 8080)
-  --port <p>          local port to listen on (default 3000)
-  --host <h>          bind address (default 127.0.0.1)
-  --aws-cli <path>    aws binary (default "aws")
+  --microvm-id <id>     MicroVM id; endpoint is looked up, token self-minted + refreshed
+  --endpoint <host>     MicroVM endpoint host (no scheme); required if no --microvm-id
+  --token <jwe>         static token (skip self-minting)
+  --region <r>          AWS region (for --microvm-id lookup/mint)
+  --map <local:vm>      Mode A: map a local port to an in-VM port; repeat per app
+  --route </p=vmPort>   Mode B: route a path prefix on --port to an in-VM port; repeat per app
+  --strip-prefix        Mode B: strip the prefix before forwarding (default on)
+  --no-strip-prefix     Mode B: forward the path unchanged (app is mounted under the prefix)
+  --backend-port <p>    single-app: in-VM port to route to (default 8080)
+  --port <p>            local port (single-app, or the Mode B origin; default 3000)
+  --allowed-ports <l>   token scope: comma list of in-VM ports, or "all"
+                        (defaults to the ports you --map / --route to)
+  --host <h>            bind address (default 127.0.0.1)
+  --aws-cli <path>      aws binary (default "aws")
   -h, --help
 
-Then open http://localhost:<port> in your browser.
+Then open the printed URL(s) in your browser.
 
 Personal hobby project — not affiliated with, supported by, or endorsed by
 AWS / Lambda / Amazon. MIT licensed, provided as-is.`;
@@ -59,12 +93,23 @@ const awsCli = args['aws-cli'] || 'aws';
 const log = (lvl, msg) => console.log(`[${lvl}] ${msg}`);
 
 let endpoint = args.endpoint;
-const proxyOpts = {
-  port: Number(args.port || 3000),
-  host: args.host || '127.0.0.1',
-  backendPort: args['backend-port'] || '8080',
-  onLog: log,
-};
+const proxyOpts = { host: args.host || '127.0.0.1', onLog: log };
+
+// Mode A (--map) | Mode B (--route) | single-app.
+if (args.map && args.route) { console.error('use --map (separate ports) OR --route (one origin by path), not both'); process.exit(1); }
+if (args.map) {
+  try { proxyOpts.routes = args.map.map(parseMap); }
+  catch (e) { console.error(e.message); process.exit(1); }
+} else if (args.route) {
+  const strip = args['no-strip-prefix'] ? false : true;
+  try { proxyOpts.routes = args.route.map((s) => ({ ...parseRoute(s), stripPrefix: strip })); }
+  catch (e) { console.error(e.message); process.exit(1); }
+  proxyOpts.port = Number(args.port || 3000);
+} else {
+  proxyOpts.port = Number(args.port || 3000);
+  proxyOpts.backendPort = args['backend-port'] || '8080';
+}
+if (args['allowed-ports']) proxyOpts.allowedPorts = args['allowed-ports'];
 
 if (args['microvm-id']) {
   if (!endpoint) {
@@ -79,7 +124,14 @@ if (args.token) { delete proxyOpts.microvmId; proxyOpts.token = args.token; }
 proxyOpts.endpoint = endpoint;
 
 const proxy = createProxy(proxyOpts);
-const { url } = await proxy.listen();
-console.log(`\n  ✓ open ${url} in your browser\n`);
+const { urls } = await proxy.listen();
+console.log('');
+if (proxy.mode === 'prefix') {
+  const origin = urls[0].url;
+  for (const r of proxy.routes) console.log(`  ✓ open ${origin}${r.prefix}  ->  in-VM :${r.backendPort}`);
+} else {
+  for (const u of urls) console.log(`  ✓ open ${u.url}  ->  in-VM :${u.backendPort}`);
+}
+console.log('');
 
 process.on('SIGINT', async () => { await proxy.close(); process.exit(0); });
