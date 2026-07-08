@@ -4,7 +4,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import assert from 'node:assert';
-import { createProxyServer, buildWsProtocols, rewriteLocation } from '../src/proxy.mjs';
+import { createProxyServer, buildWsProtocols, rewriteLocation, describeConnError } from '../src/proxy.mjs';
 import { createTokenProvider, allowedPortsJson, classifyRoutes, makePrefixResolver, createPool } from '../src/index.mjs';
 
 let pass = 0, fail = 0;
@@ -277,6 +277,143 @@ await t('pool: round-robins targets, injects auth + x-served-by', async () => {
   assert.equal(mock.seen.http.authHeader, TOKEN, 'pool injected auth header');
   assert.deepEqual(served.sort(), ['vm-a', 'vm-b'], 'round-robined across both targets');
   await pool.close();
+});
+
+// --- unit: token provider force-refresh (0.3.0) ---
+await t('token provider: refresh() re-mints; static refresh() is a no-op', async () => {
+  let n = 0;
+  const g = createTokenProvider({ getToken: () => `tok-${++n}` });
+  assert.equal(await g(), 'tok-1', 'first mint cached');
+  assert.equal(await g(), 'tok-1', 'still cached');
+  assert.equal(await g.refresh(), 'tok-2', 'refresh() forces a new mint');
+  assert.equal(await g(), 'tok-2', 'refreshed value is now cached');
+  const s = createTokenProvider({ token: 'static' });
+  assert.equal(typeof s.refresh, 'function', 'static provider exposes refresh()');
+  assert.equal(await s.refresh(), 'static', 'static refresh() returns the same token');
+});
+
+// --- unit: connect-error translation (0.3.0) ---
+await t('describeConnError: maps errno to human text', () => {
+  assert.match(describeConnError({ code: 'ENOTFOUND' }), /DNS/);
+  assert.match(describeConnError({ code: 'ECONNREFUSED' }), /unreachable/);
+  assert.match(describeConnError({ code: 'ETIMEDOUT' }), /unreachable/);
+  assert.equal(describeConnError({ code: 'EWEIRD', message: 'odd' }), 'odd', 'unknown errno falls back to message');
+});
+
+// --- integration: typed uvlink errors (0.3.0) ---
+await t('typed errors: no-route -> 404 with x-uvlink-error header + body', async () => {
+  const srv = createProxyServer({
+    endpoint: '127.0.0.1', getToken: async () => TOKEN,
+    resolvePort: () => null, _upstreamPort: mock.port, _upstreamTls: false,
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+  const res = await new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${p}/x`, (r) => { let b=''; r.on('data',c=>b+=c); r.on('end',()=>resolve({ code:r.statusCode, kind:r.headers['x-uvlink-error'], b })); }).on('error', reject);
+  });
+  assert.equal(res.code, 404);
+  assert.equal(res.kind, 'no-route', 'x-uvlink-error header set');
+  assert.match(res.b, /uvlink \[no-route\]/, 'typed body');
+  srv.close();
+});
+
+await t('typed errors: token-error -> 502 x-uvlink-error=token-error', async () => {
+  const srv = createProxyServer({
+    endpoint: '127.0.0.1', getToken: async () => { throw new Error('mint boom'); },
+    backendPort: '8080', _upstreamPort: mock.port, _upstreamTls: false,
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+  const res = await new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${p}/x`, (r) => { let b=''; r.on('data',c=>b+=c); r.on('end',()=>resolve({ code:r.statusCode, kind:r.headers['x-uvlink-error'], b })); }).on('error', reject);
+  });
+  assert.equal(res.code, 502);
+  assert.equal(res.kind, 'token-error');
+  assert.match(res.b, /mint boom/);
+  srv.close();
+});
+
+await t('typed errors: unreachable endpoint -> 502 upstream-unreachable', async () => {
+  // Point the test seam at a closed port so the connect fails.
+  const dead = http.createServer(); await new Promise((r) => dead.listen(0, '127.0.0.1', r));
+  const deadPort = dead.address().port; await new Promise((r) => dead.close(r));
+  const srv = createProxyServer({
+    endpoint: '127.0.0.1', getToken: async () => TOKEN, backendPort: '8080',
+    _upstreamPort: deadPort, _upstreamTls: false,
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+  const res = await new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${p}/x`, (r) => { let b=''; r.on('data',c=>b+=c); r.on('end',()=>resolve({ code:r.statusCode, kind:r.headers['x-uvlink-error'], b })); }).on('error', reject);
+  });
+  assert.equal(res.code, 502);
+  assert.equal(res.kind, 'upstream-unreachable');
+  srv.close();
+});
+
+// --- integration: pass-through 403 gets a hint header (0.3.0) ---
+await t('403 passthrough: endpoint 403 (unchanged token) forwards with x-uvlink-hint', async () => {
+  // Backend always 403s; a static token means refresh() can't change it, so the
+  // proxy should NOT loop — it forwards the 403 with a hint.
+  const deny = http.createServer((req, res) => { res.writeHead(403); res.end('nope'); });
+  await new Promise((r) => deny.listen(0, '127.0.0.1', r));
+  const denyPort = deny.address().port;
+  const srv = createProxyServer({
+    endpoint: '127.0.0.1', getToken: async () => TOKEN, backendPort: '8080',
+    _upstreamPort: denyPort, _upstreamTls: false,
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+  const res = await new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${p}/x`, (r) => { r.on('data',()=>{}); r.on('end',()=>resolve({ code:r.statusCode, hint:r.headers['x-uvlink-hint'] })); }).on('error', reject);
+  });
+  assert.equal(res.code, 403, '403 status preserved');
+  assert.match(res.hint || '', /token/, 'hint header explains the 403');
+  srv.close(); await new Promise((r) => deny.close(r));
+});
+
+// --- integration: reactive 403 retry re-mints and replays the body once (0.3.0) ---
+await t('403 retry: stale token 403s, refreshed token succeeds, POST body replayed', async () => {
+  const GOOD = 'good-token', STALE = 'stale-token';
+  const got = [];
+  // Backend: 403 unless it sees GOOD; on success echoes the received body + auth.
+  const be = http.createServer((req, res) => {
+    let b = ''; req.on('data', c => b += c); req.on('end', () => {
+      const auth = req.headers['x-aws-proxy-auth'];
+      got.push({ auth, body: b });
+      if (auth !== GOOD) { res.writeHead(403); res.end('stale'); return; }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, echo: b }));
+    });
+  });
+  await new Promise((r) => be.listen(0, '127.0.0.1', r));
+  const bePort = be.address().port;
+
+  // Token provider that mints STALE first, GOOD after a forced refresh.
+  let minted = 0;
+  const provider = createTokenProvider({ getToken: () => (++minted === 1 ? STALE : GOOD) });
+
+  const srv = createProxyServer({
+    endpoint: '127.0.0.1', getToken: provider, backendPort: '8080',
+    _upstreamPort: bePort, _upstreamTls: false,
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const p = srv.address().port;
+
+  const out = await new Promise((resolve, reject) => {
+    const req = http.request(`http://127.0.0.1:${p}/submit`, { method: 'POST', headers: { 'content-type': 'text/plain', 'content-length': 5 } },
+      (r) => { let b=''; r.on('data',c=>b+=c); r.on('end',()=>resolve({ code:r.statusCode, b })); });
+    req.on('error', reject);
+    req.end('hello');
+  });
+  assert.equal(out.code, 200, 'retry with refreshed token succeeded');
+  assert.equal(JSON.parse(out.b).echo, 'hello', 'body delivered to backend on the retry');
+  assert.equal(got.length, 2, 'exactly one retry (2 upstream hits)');
+  assert.equal(got[0].auth, STALE, 'first attempt used the stale token');
+  assert.equal(got[1].auth, GOOD, 'retry used the refreshed token');
+  assert.equal(got[0].body, 'hello', 'body buffered + sent on first attempt');
+  assert.equal(got[1].body, 'hello', 'same body replayed on retry');
+  srv.close(); await new Promise((r) => be.close(r));
 });
 
 proxySrv.close(); mock.srv.close();

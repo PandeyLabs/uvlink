@@ -61,10 +61,14 @@ async function mintViaCli({ microvmId, region, awsCli = 'aws', ttlMinutes = DEFA
 export function createTokenProvider(opts = {}) {
   const log = opts.onLog || (() => {});
 
-  // 1. static token — no refresh
+  // 1. static token — no refresh. refresh() is a no-op that returns the same
+  // value, so a caller's "re-mint on 403 then retry" logic naturally skips the
+  // retry (the token didn't change).
   if (opts.token) {
     const t = String(opts.token).trim();
-    return async () => t;
+    const getToken = async () => t;
+    getToken.refresh = async () => t;
+    return getToken;
   }
 
   // pick the underlying minter for 2 (custom) or 3 (self-mint)
@@ -95,11 +99,18 @@ export function createTokenProvider(opts = {}) {
     return inflight;
   }
 
-  return async function getToken() {
+  async function getToken() {
     const age = Date.now() - mintedAt;
     if (!cached || age > ttlMs - REFRESH_BEFORE_MS) return refresh();
     return cached;
-  };
+  }
+
+  // Force a re-mint regardless of TTL. Used to react to an upstream 403 (the
+  // token was rejected before its expected expiry — e.g. the VM slept past the
+  // token's life, or it was revoked). Shares the inflight collapse so a burst of
+  // 403s triggers a single re-mint.
+  getToken.refresh = refresh;
+  return getToken;
 }
 
 export { mintViaCli, allowedPortsJson };

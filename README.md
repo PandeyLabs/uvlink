@@ -186,7 +186,21 @@ browser ──HTTP/WS──▶ uvlink ──HTTPS──▶ MicroVM endpoint
                      · WS:    prepend lambda-microvms.* subprotocols,
                               keep the app's own subprotocol
                      · token cached + refreshed before the 60-min TTL
+                     · on a 403, re-mint the token and replay the request once
 ```
+
+## Resilience & errors
+
+- **Token expiry is self-healing (HTTP).** If the endpoint returns 403 because the
+  token went stale (e.g. the MicroVM was idle past the token's life), uvlink
+  refreshes the token and replays the request once. Bodies up to 1 MiB are
+  buffered so the replay carries the same payload; larger/chunked bodies aren't
+  retried.
+- **Errors say what went wrong.** uvlink-generated failures carry an
+  `x-uvlink-error` header and a `uvlink [kind]: detail` body — e.g.
+  `upstream-unreachable` (VM terminated or wrong endpoint), `token-error`,
+  `no-route`. A pass-through 403 gets an `x-uvlink-hint` explaining the token/port
+  cause.
 
 ## Examples
 

@@ -1,6 +1,6 @@
 {
   "name": "uvlink",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A browser bridge for AWS Lambda MicroVMs — reach a MicroVM endpoint from a browser without hand-rolling a proxy. Injects the X-aws-proxy-auth token for HTTP and the lambda-microvms subprotocols for WebSockets, and auto-refreshes the token. Personal hobby project; not affiliated with or endorsed by AWS/Lambda/Amazon.",
   "type": "module",
   "main": "src/index.mjs",

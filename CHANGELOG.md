@@ -3,6 +3,31 @@
 All notable changes to uvlink are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow semver.
 
+## [0.3.0] — Resilient tokens & legible errors
+
+Survive token expiry, and get failures that explain themselves. Still zero
+dependencies, still pure transport.
+
+### Added
+- **Reactive token refresh on 403 (HTTP).** If the endpoint rejects a request
+  with 403 (e.g. the token expired out-of-band while the MicroVM was idle), uvlink
+  force-refreshes the token and **replays the request once**. Only retries if the
+  refresh yields a *different* token — an unchanged token means the 403 is about
+  something else (e.g. the port isn't in the token's scope), so it's passed through.
+  - The request body is buffered (up to 1 MiB) to enable the replay. Chunked or
+    larger bodies stream through and are not retried (logged when this happens).
+  - WebSocket upgrades are not auto-retried in this release.
+- **`getToken.refresh()`** on the token provider — a force re-mint that bypasses
+  the TTL cache and collapses concurrent calls. Static tokens expose a no-op
+  `refresh()` returning the same value.
+- **Typed error surfacing.** uvlink-generated errors now carry an
+  `x-uvlink-error` header (`route-error`, `no-route`, `token-error`,
+  `upstream-unreachable`) plus a `uvlink [kind]: detail` body, instead of a
+  generic 502. Socket connect errors are translated (`ENOTFOUND` → DNS didn't
+  resolve; `ECONNREFUSED`/`ETIMEDOUT`/`ECONNRESET` → endpoint unreachable, VM may
+  be terminated). A pass-through 403 from the endpoint gets an `x-uvlink-hint`
+  header explaining the likely token/port cause (status unchanged).
+
 ## [0.2.0] — One MicroVM, many apps
 
 Front several apps running on a single MicroVM through one uvlink process. Two

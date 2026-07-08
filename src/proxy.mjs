@@ -14,6 +14,35 @@ import net from 'node:net';
 
 const DEFAULT_BACKEND_PORT = '8080';
 
+// Largest request body we'll buffer to enable a single 403-retry (see below).
+// Bodies above this stream straight through and are not retried.
+const MAX_RETRY_BODY = 1024 * 1024;   // 1 MiB
+
+// Turn a socket-level connect error into something a human can act on. These are
+// uvlink-side failures reaching the endpoint, distinct from status codes the
+// endpoint itself returns.
+function describeConnError(e) {
+  switch (e.code) {
+    case 'ENOTFOUND':
+      return 'endpoint DNS did not resolve — check the endpoint host';
+    case 'ECONNREFUSED':
+    case 'ETIMEDOUT':
+    case 'ECONNRESET':
+      return 'endpoint unreachable — the MicroVM may be terminated or the endpoint is wrong';
+    default:
+      return e.message;
+  }
+}
+
+// Emit a uvlink-generated error response: a machine-readable x-uvlink-error
+// header plus a plain-text body. `kind` is a stable slug (route-error, no-route,
+// token-error, upstream-unreachable); these are OUR errors, not the app's.
+function sendUvlinkError(cres, status, kind, detail) {
+  if (cres.headersSent) { cres.end(); return; }
+  cres.writeHead(status, { 'x-uvlink-error': kind, 'content-type': 'text/plain' });
+  cres.end(`uvlink [${kind}]: ${detail}\n`);
+}
+
 // Build the Sec-WebSocket-Protocol value the MicroVM endpoint expects, while
 // preserving whatever subprotocol the browser/app requested (e.g. Jupyter's
 // "v1.kernel.websocket.jupyter.org") so negotiation still succeeds.
@@ -57,37 +86,91 @@ function attachProxy(server, opts) {
   server.on('request', async (creq, cres) => {
     let target;
     try { target = await resolveTarget(creq); }
-    catch (e) { cres.writeHead(502); cres.end('route error: ' + e.message); return; }
-    if (target == null) { cres.writeHead(404); cres.end('uvlink: no route for ' + creq.url); return; }
+    catch (e) { sendUvlinkError(cres, 502, 'route-error', e.message); return; }
+    if (target == null) { sendUvlinkError(cres, 404, 'no-route', 'no route for ' + creq.url); return; }
 
     let token;
     try { token = await tokenOf(target); }
-    catch (e) { cres.writeHead(502); cres.end('token error: ' + e.message); return; }
+    catch (e) { sendUvlinkError(cres, 502, 'token-error', e.message); return; }
 
     const path = target.path != null ? target.path : creq.url;
-    const headers = {
+    const agent = upstreamTls ? https : http;
+    const headersFor = (tok) => ({
       ...creq.headers,
       host: target.endpoint,
-      'x-aws-proxy-auth': token,
+      'x-aws-proxy-auth': tok,
       'x-aws-proxy-port': String(target.port),
-    };
-    const agent = upstreamTls ? https : http;
-    const preq = agent.request(
-      { host: connectHost(target), port: upstreamPort, method: creq.method, path, headers,
-        servername: upstreamTls ? target.endpoint : undefined },
-      (pres) => {
-        let resHeaders = rewriteLocation(pres.headers, target.prefix);
-        if (target.servedBy) resHeaders = { ...resHeaders, 'x-served-by': target.servedBy };
-        cres.writeHead(pres.statusCode, resHeaders);
-        pres.pipe(cres);
-      }
-    );
-    preq.on('error', (e) => {
-      log('error', `http upstream: ${e.message}`);
-      if (!cres.headersSent) cres.writeHead(502);
-      cres.end('upstream error: ' + e.message);
     });
-    creq.pipe(preq);
+
+    // Pipe an upstream response back to the client. When the ENDPOINT itself
+    // returns 403 (not our error), add a hint header explaining the likely cause
+    // — we don't alter the status the app/platform chose.
+    const forwardResponse = (pres) => {
+      let resHeaders = rewriteLocation(pres.headers, target.prefix);
+      if (target.servedBy) resHeaders = { ...resHeaders, 'x-served-by': target.servedBy };
+      if (pres.statusCode === 403) {
+        resHeaders = { ...resHeaders,
+          'x-uvlink-hint': 'endpoint returned 403: token invalid/expired, or the requested port is not in the token scope' };
+      }
+      cres.writeHead(pres.statusCode, resHeaders);
+      pres.pipe(cres);
+    };
+    const onUpstreamError = (e) => {
+      log('error', `http upstream: ${e.message}`);
+      sendUvlinkError(cres, 502, 'upstream-unreachable', describeConnError(e));
+    };
+    const connectOpts = (tok) => ({ host: connectHost(target), port: upstreamPort,
+      method: creq.method, path, headers: headersFor(tok),
+      servername: upstreamTls ? target.endpoint : undefined });
+
+    // We can replay this request once on a 403 only if we hold the whole body.
+    // Buffer it when there's a Content-Length within the cap (covers GETs and
+    // small POSTs — the usual "first call after the token went stale" case).
+    // Chunked or large bodies stream straight through and are NOT retried.
+    const len = Number(creq.headers['content-length'] || 0);
+    const canBuffer = Number.isFinite(len) && len <= MAX_RETRY_BODY;
+
+    if (!canBuffer) {
+      log('info', 'request body not buffered (chunked or over cap) — no 403-retry');
+      const preq = agent.request(connectOpts(token), forwardResponse);
+      preq.on('error', onUpstreamError);
+      creq.pipe(preq);
+      return;
+    }
+
+    const chunks = [];
+    creq.on('data', (c) => chunks.push(c));
+    creq.on('error', (e) => log('error', `client body: ${e.message}`));
+    creq.on('end', () => {
+      const body = Buffer.concat(chunks);
+      let retried = false;
+
+      const attempt = (tok) => {
+        const preq = agent.request(connectOpts(tok), (pres) => {
+          // On a 403, try a single re-mint+replay. Only replay if the forced
+          // refresh yields a DIFFERENT token; an unchanged token means the 403 is
+          // about something else (e.g. port not in scope) — pass it through.
+          if (pres.statusCode === 403 && !retried && typeof target.getToken.refresh === 'function') {
+            retried = true;
+            Promise.resolve(target.getToken.refresh()).then((nt) => {
+              const newTok = String(nt).trim();
+              if (newTok && newTok !== tok) {
+                log('info', 'endpoint 403 — retrying once with a refreshed token');
+                pres.resume();          // discard the 403 body before replaying
+                attempt(newTok);
+              } else {
+                forwardResponse(pres);
+              }
+            }).catch((e) => { log('error', `token refresh failed: ${e.message}`); forwardResponse(pres); });
+            return;
+          }
+          forwardResponse(pres);
+        });
+        preq.on('error', onUpstreamError);
+        preq.end(body);
+      };
+      attempt(token);
+    });
   });
 
   // ---- WebSocket upgrade path ----
@@ -121,7 +204,9 @@ function attachProxy(server, opts) {
       usock.pipe(csock);
       csock.pipe(usock);
     });
-    usock.on('error', (e) => { log('error', `ws upstream: ${e.message}`); csock.destroy(); });
+    // WS gets clearer error logging but no 403-retry in 0.3.0 — replaying a
+    // half-open upgrade handshake is harder and rarer than the HTTP case.
+    usock.on('error', (e) => { log('error', `ws upstream: ${describeConnError(e)}`); csock.destroy(); });
     csock.on('error', () => usock.destroy());
   });
 
@@ -186,4 +271,4 @@ export function createProxyServer(opts) {
 }
 
 // exported for tests + reuse
-export { buildWsProtocols, rewriteLocation, attachProxy };
+export { buildWsProtocols, rewriteLocation, attachProxy, describeConnError };
